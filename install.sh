@@ -1,10 +1,10 @@
 #!/bin/bash
 # mcp-hwp Installer Script for macOS and Linux
-# Usage: curl -sSL https://raw.githubusercontent.com/cypark/mcp-hwp/main/install.sh | bash
+# Usage: curl -sSL https://raw.githubusercontent.com/mrchypark/mcp-hwp/main/install.sh | bash
 
 set -e
 
-REPO="cypark/mcp-hwp"
+REPO="mrchypark/mcp-hwp"
 BINARY_NAME="mcp-hwp"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 

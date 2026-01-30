@@ -1,9 +1,9 @@
 # mcp-hwp Installer Script for Windows
-# Usage: iwr -useb https://raw.githubusercontent.com/cypark/mcp-hwp/main/install.ps1 | iex
+# Usage: iwr -useb https://raw.githubusercontent.com/mrchypark/mcp-hwp/main/install.ps1 | iex
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "cypark/mcp-hwp"
+$Repo = "mrchypark/mcp-hwp"
 $BinaryName = "mcp-hwp.exe"
 $InstallDir = $env:INSTALL_DIR
 if (-not $InstallDir) {
