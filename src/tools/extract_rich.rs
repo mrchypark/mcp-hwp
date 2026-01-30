@@ -1,12 +1,12 @@
-use crate::input::{load_input, InputFormat};
+use crate::input::{InputFormat, load_input};
 use crate::mcp::contracts::MAX_OUTPUT_BYTES;
 use crate::mcp::errors;
 use crate::tools::error_result;
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use hwpers::model::bin_data::BinData;
 use hwpers::{HwpError, HwpReader, HwpxReader};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
