@@ -2,6 +2,8 @@ use serde_json::json;
 
 pub mod convert;
 pub mod create_document;
+pub mod create_rich_document;
+pub mod extract_rich;
 pub mod extract_text;
 pub mod inspect_metadata;
 pub mod render_svg;

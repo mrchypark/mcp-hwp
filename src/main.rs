@@ -333,6 +333,8 @@ fn handle_tool_call(request: &serde_json::Value) -> serde_json::Value {
         mcp::contracts::TOOL_RENDER_SVG => tools::render_svg::call(&args),
         mcp::contracts::TOOL_CONVERT => tools::convert::call(&args),
         mcp::contracts::TOOL_CREATE_DOCUMENT => tools::create_document::call(&args),
+        mcp::contracts::TOOL_CREATE_RICH_DOCUMENT => tools::create_rich_document::call(&args),
+        mcp::contracts::TOOL_EXTRACT_RICH => tools::extract_rich::call(&args),
         _ => tools::error_result(
             mcp::errors::INVALID_INPUT,
             format!("tool not implemented: {name}"),

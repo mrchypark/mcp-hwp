@@ -35,5 +35,15 @@ pub fn tool_definitions() -> Vec<serde_json::Value> {
             "description": "Create new HWP documents from text.",
             "inputSchema": contracts::create_document_schema()
         }),
+        json!({
+            "name": contracts::TOOL_CREATE_RICH_DOCUMENT,
+            "description": "Create a rich HWP/HWPX document from a block-based JSON spec (paragraphs/headings/tables/images).",
+            "inputSchema": contracts::create_rich_document_schema()
+        }),
+        json!({
+            "name": contracts::TOOL_EXTRACT_RICH,
+            "description": "Extract a rich block structure (paragraphs/tables/images) from HWP/HWPX documents.",
+            "inputSchema": contracts::extract_rich_schema()
+        }),
     ]
 }
