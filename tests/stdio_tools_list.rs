@@ -45,6 +45,8 @@ fn tools_list_includes_expected_tools() -> Result<(), Box<dyn std::error::Error>
         "hwp.render_svg",
         "hwp.convert",
         "hwp.create_document",
+        "hwp.create_rich_document",
+        "hwp.extract_rich",
     ]
     .into_iter()
     .collect();
