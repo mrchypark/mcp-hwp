@@ -22,6 +22,8 @@ Rust CLI + stdio MCP server for reading/writing HWP/HWPX using the `hwpers` crat
 - `hwp.render_svg`
 - `hwp.convert`
 - `hwp.create_document`
+- `hwp.create_rich_document`
+- `hwp.extract_rich`
 
 ## Quickstart
 
@@ -304,6 +306,62 @@ Behavior:
 structuredContent:
 - inline: `{ base64, bytes_len }`
 - resource: `{ path, uri, bytes_len }`
+
+### hwp.create_rich_document
+
+Arguments:
+- `to` (optional): `hwp`|`hwpx` (default: `hwp`)
+- `output_path` (optional)
+- `document` (required): block-based spec
+  - `title` (optional)
+  - `author` (optional)
+  - `header` / `footer` (optional; best-effort, varies by output format)
+  - `blocks` (required): array of
+    - `paragraph`: `{ type: "paragraph", text, style? }`
+      - `style`: `{ font_name?, font_size?, bold?, italic?, underline?, color? }`
+        - `color`: hex string (e.g., `"0xFF0000"`, `"#FF0000"`)
+    - `heading`: `{ type: "heading", level, text }`
+    - `table`: `{ type: "table", rows, header_row? }`
+    - `image`: `{ type: "image", path? | data_base64?, mimeType?, width_mm?, height_mm?, caption?, align?, wrap_text? }`
+      - `path`: local file path to image (alternative to `data_base64`)
+      - `data_base64`: base64-encoded image data (requires `mimeType`)
+      - `mimeType`: `"image/png"`, `"image/jpeg"`, `"image/gif"`, `"image/bmp"`
+      - `align`: `"left"`, `"center"`, `"right"`, `"inline"` (default: `"center"`)
+      - `wrap_text`: boolean (default: `false`)
+    - `page_break`: `{ type: "page_break" }` - **not fully supported** (adds empty paragraph)
+    - `list`: `{ type: "list", items, list_type? | ordered? }`
+      - `items`: array of strings
+      - `list_type`: `"bullet"`, `"numbered"`, `"alphabetic"`, `"roman"`, `"korean"` (default: `"bullet"`)
+      - `ordered`: boolean (legacy, use `list_type: "numbered"` instead)
+    - `heading`: `{ type: "heading", level, text }`
+    - `table`: `{ type: "table", rows, header_row?, border_style? }`
+      - `rows`: array of arrays (cells can be strings or objects)
+        - Simple: `["cell1", "cell2"]`
+        - Advanced: `{ "content": "text", "row_span?": number, "col_span?": number }`
+      - `border_style`: `"none"`, `"basic"`, `"full"` (default: none)
+      - Note: `row_span`/`col_span` supported for cell merging; cell-level styling not supported
+    - `image`: `{ type: "image", path? | data_base64?, mimeType?, width_mm?, height_mm?, caption?, align?, wrap_text? }`
+
+structuredContent:
+- inline: `{ to, base64, bytes_len, warnings }`
+- resource: `{ to, path, uri, bytes_len, warnings }`
+
+### hwp.extract_rich
+
+Arguments:
+- `path` or `base64`
+- `format`: `auto`|`hwp`|`hwpx`
+- `images`: `none`|`metadata`|`inline`|`resource` (default: `metadata`)
+- `max_image_bytes` (optional)
+- `output_path` (optional): custom directory for saving extracted images (when `images` is `resource`)
+
+structuredContent:
+- `{ format, blocks, warnings }`
+- `blocks` contains a best-effort ordered list of:
+  - `{ type: "paragraph", text, section_index, paragraph_index }`
+  - `{ type: "table", rows, inferred, cells_count, section_index, paragraph_index }`
+  - `{ type: "image", caption?, ... }` (caption-anchored; image bytes may be unavailable depending on parser)
+  - Images with `images: "resource"` include `path` and `uri` fields
 
 ## Errors
 
