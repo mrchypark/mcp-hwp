@@ -27,13 +27,35 @@ Rust CLI + stdio MCP server for reading/writing HWP/HWPX using the `hwpers` crat
 
 ## Quickstart
 
-### Build
+### Install from Release (Recommended)
 
+**macOS/Linux:**
 ```bash
-cargo build
+curl -sSL https://raw.githubusercontent.com/cypark/mcp-hwp/main/install.sh | bash
 ```
 
-### Install locally
+**Windows (PowerShell):**
+```powershell
+iwr -useb https://raw.githubusercontent.com/cypark/mcp-hwp/main/install.ps1 | iex
+```
+
+**Manual Installation:**
+Download the latest binary for your platform from [Releases](https://github.com/cypark/mcp-hwp/releases) and add it to your PATH.
+
+Available targets:
+- `mcp-hwp-x86_64-apple-darwin.tar.gz` (macOS Intel)
+- `mcp-hwp-aarch64-apple-darwin.tar.gz` (macOS Apple Silicon)
+- `mcp-hwp-x86_64-unknown-linux-gnu.tar.gz` (Linux x64)
+- `mcp-hwp-aarch64-unknown-linux-gnu.tar.gz` (Linux ARM64)
+- `mcp-hwp-x86_64-pc-windows-msvc.zip` (Windows x64)
+
+### Build from Source
+
+```bash
+cargo build --release
+```
+
+### Install locally from source
 
 ```bash
 cargo install --path .
