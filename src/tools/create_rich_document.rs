@@ -152,7 +152,6 @@ enum BlockSpec {
     },
     Image {
         source: ImageSource,
-        mime_type: Option<String>,
         width_mm: Option<u32>,
         height_mm: Option<u32>,
         caption: Option<String>,
@@ -462,7 +461,6 @@ fn parse_block(value: &Value) -> Result<BlockSpec, ToolError> {
                     source: ImageSource::File {
                         path: path.to_string(),
                     },
-                    mime_type: None,
                     width_mm,
                     height_mm,
                     caption,
@@ -488,7 +486,6 @@ fn parse_block(value: &Value) -> Result<BlockSpec, ToolError> {
 
                 Ok(BlockSpec::Image {
                     source: ImageSource::Base64 { data, mime_type },
-                    mime_type: None,
                     width_mm,
                     height_mm,
                     caption,
@@ -824,7 +821,6 @@ fn build_hwp(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec<
             }
             BlockSpec::Image {
                 source,
-                mime_type: _,
                 width_mm,
                 height_mm,
                 caption,
@@ -1049,7 +1045,6 @@ fn build_hwpx(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec
             }
             BlockSpec::Image {
                 source,
-                mime_type: _,
                 width_mm,
                 height_mm,
                 caption,

@@ -1,6 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use tempfile::tempdir;
 
 fn send_request(
     stdin: &mut std::process::ChildStdin,

@@ -179,8 +179,8 @@ pub fn call(args: &Value) -> Value {
                 let cell_count = j.saturating_sub(i + 1);
                 if cell_count >= 2 {
                     let mut cells: Vec<String> = Vec::with_capacity(cell_count);
-                    for idx in (i + 1)..j {
-                        cells.push(paragraph_text(&paragraphs[idx]).trim().to_string());
+                    for paragraph in paragraphs.iter().take(j).skip(i + 1) {
+                        cells.push(paragraph_text(paragraph).trim().to_string());
                     }
 
                     let (rows, cols) = infer_table_dims(cells.len());
@@ -376,10 +376,6 @@ fn mime_from_extension(ext: &str) -> Option<&'static str> {
         "bmp" => Some("image/bmp"),
         _ => None,
     }
-}
-
-fn normalize_paragraph_text(value: &str) -> String {
-    value.trim_end_matches(&['\r', '\n'][..]).to_string()
 }
 
 fn paragraph_text(paragraph: &hwpers::model::paragraph::Paragraph) -> String {
