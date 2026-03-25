@@ -1,5 +1,6 @@
-use crate::mcp::contracts::MAX_OUTPUT_BYTES;
-use crate::mcp::errors;
+use crate::constants::MAX_OUTPUT_BYTES;
+use crate::errors::AppError;
+use crate::results::{BinaryArtifact, FileArtifact};
 use crate::tools::error_result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -8,116 +9,43 @@ use serde_json::{Value, json};
 use std::fs;
 use std::path::Path;
 
-pub fn call(args: &Value) -> Value {
-    let to_format = match OutputFormat::parse(args.get("to")) {
-        Ok(value) => value,
-        Err(err) => return error_result(err.kind, err.message, None),
-    };
-
-    let output_path = match parse_output_path(args.get("output_path")) {
-        Ok(path) => path,
-        Err(err) => return error_result(err.kind, err.message, None),
-    };
-
-    let document = match parse_document_spec(args.get("document")) {
-        Ok(doc) => doc,
-        Err(err) => return error_result(err.kind, err.message, None),
-    };
-
-    let mut warnings: Vec<String> = Vec::new();
-
-    let output_bytes = match to_format {
-        OutputFormat::Hwp => match build_hwp(&document, &mut warnings) {
-            Ok(bytes) => bytes,
-            Err(err) => return error_result(err.kind, err.message, None),
-        },
-        OutputFormat::Hwpx => match build_hwpx(&document, &mut warnings) {
-            Ok(bytes) => bytes,
-            Err(err) => return error_result(err.kind, err.message, None),
-        },
-    };
-
-    let bytes_len = output_bytes.len() as u64;
-
-    match output_path {
-        Some(path) => match write_output(&path, &output_bytes) {
-            Ok(output) => json!({
-                "content": output.content,
-                "structuredContent": {
-                    "to": to_format.as_str(),
-                    "path": output.path,
-                    "uri": output.uri,
-                    "bytes_len": bytes_len,
-                    "warnings": warnings
-                },
-                "isError": false
-            }),
-            Err(err) => error_result(err.kind, err.message, None),
-        },
-        None => {
-            if bytes_len > MAX_OUTPUT_BYTES {
-                return error_result(
-                    errors::TOO_LARGE,
-                    format!("output exceeds limit: {bytes_len} bytes (max {MAX_OUTPUT_BYTES})"),
-                    None,
-                );
-            }
-            let base64 = STANDARD.encode(&output_bytes);
-            json!({
-                "content": [{
-                    "type": "text",
-                    "text": format!("created rich document ({}) ({bytes_len} bytes)", to_format.as_str())
-                }],
-                "structuredContent": {
-                    "to": to_format.as_str(),
-                    "base64": base64,
-                    "bytes_len": bytes_len,
-                    "warnings": warnings
-                },
-                "isError": false
-            })
-        }
-    }
+#[derive(Debug, Clone)]
+pub struct Request {
+    pub to: OutputFormat,
+    pub output_path: Option<String>,
+    pub document: DocumentSpec,
 }
 
-struct ToolError {
-    kind: &'static str,
-    message: String,
+#[derive(Debug, Clone)]
+pub struct Response {
+    pub to: OutputFormat,
+    pub output: BinaryArtifact,
+    pub file: Option<FileArtifact>,
+    pub warnings: Vec<String>,
 }
 
-struct OutputResource {
-    path: String,
-    uri: String,
-    content: Vec<Value>,
-}
-
-enum OutputFormat {
+#[derive(Debug, Clone)]
+pub enum OutputFormat {
     Hwp,
     Hwpx,
 }
 
 impl OutputFormat {
-    fn parse(value: Option<&Value>) -> Result<Self, ToolError> {
+    fn parse(value: Option<&Value>) -> Result<Self, AppError> {
         let Some(value) = value else {
             return Ok(OutputFormat::Hwp);
         };
         let Some(value) = value.as_str() else {
-            return Err(ToolError {
-                kind: errors::INVALID_INPUT,
-                message: "to must be a string".to_string(),
-            });
+            return Err(AppError::invalid_input("to must be a string"));
         };
         match value {
             "hwp" => Ok(OutputFormat::Hwp),
             "hwpx" => Ok(OutputFormat::Hwpx),
-            _ => Err(ToolError {
-                kind: errors::INVALID_INPUT,
-                message: "to must be hwp or hwpx".to_string(),
-            }),
+            _ => Err(AppError::invalid_input("to must be hwp or hwpx")),
         }
     }
 
-    fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             OutputFormat::Hwp => "hwp",
             OutputFormat::Hwpx => "hwpx",
@@ -125,8 +53,117 @@ impl OutputFormat {
     }
 }
 
+pub fn request_from_value(args: &Value) -> Result<Request, AppError> {
+    Ok(Request {
+        to: OutputFormat::parse(args.get("to"))?,
+        output_path: parse_output_path(args.get("output_path"))?,
+        document: parse_document_spec(args.get("document"))?,
+    })
+}
+
+pub fn run(req: Request) -> Result<Response, AppError> {
+    let Request {
+        to,
+        output_path,
+        document,
+    } = req;
+
+    let mut warnings = Vec::new();
+    let output_bytes = match to {
+        OutputFormat::Hwp => build_hwp(&document, &mut warnings)?,
+        OutputFormat::Hwpx => build_hwpx(&document, &mut warnings)?,
+    };
+    let bytes_len = output_bytes.len() as u64;
+
+    let file = match output_path {
+        Some(path) => {
+            write_output(&path, &output_bytes)?;
+            Some(FileArtifact { path, bytes_len })
+        }
+        None => {
+            if bytes_len > MAX_OUTPUT_BYTES {
+                return Err(AppError::too_large(format!(
+                    "output exceeds limit: {bytes_len} bytes (max {MAX_OUTPUT_BYTES})"
+                )));
+            }
+            None
+        }
+    };
+
+    Ok(Response {
+        to,
+        output: BinaryArtifact {
+            bytes: output_bytes,
+            bytes_len,
+        },
+        file,
+        warnings,
+    })
+}
+
+pub fn call(args: &Value) -> Value {
+    let req = match request_from_value(args) {
+        Ok(req) => req,
+        Err(err) => return error_result(err.kind, err.message, None),
+    };
+    let response = match run(req) {
+        Ok(response) => response,
+        Err(err) => return error_result(err.kind, err.message, None),
+    };
+
+    if let Some(file) = response.file {
+        let uri = format!("file://{}", file.path);
+        let name = Path::new(&file.path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("document");
+
+        return json!({
+            "content": [
+                {
+                    "type": "text",
+                    "text": format!("document written to {}", file.path)
+                },
+                {
+                    "type": "resource_link",
+                    "uri": uri,
+                    "name": name,
+                    "mimeType": "application/octet-stream"
+                }
+            ],
+            "structuredContent": {
+                "to": response.to.as_str(),
+                "path": file.path,
+                "uri": uri,
+                "bytes_len": file.bytes_len,
+                "warnings": response.warnings
+            },
+            "isError": false
+        });
+    }
+
+    let base64 = STANDARD.encode(&response.output.bytes);
+    json!({
+        "content": [{
+            "type": "text",
+            "text": format!(
+                "created rich document ({}) ({} bytes)",
+                response.to.as_str(),
+                response.output.bytes_len
+            )
+        }],
+        "structuredContent": {
+            "to": response.to.as_str(),
+            "base64": base64,
+            "bytes_len": response.output.bytes_len,
+            "warnings": response.warnings
+        },
+        "isError": false
+    })
+}
+
 #[derive(Clone, Debug)]
-struct DocumentSpec {
+pub struct DocumentSpec {
     title: Option<String>,
     author: Option<String>,
     header: Option<String>,
@@ -222,37 +259,25 @@ struct TextStyleSpec {
     color: Option<u32>,
 }
 
-fn parse_output_path(value: Option<&Value>) -> Result<Option<String>, ToolError> {
+fn parse_output_path(value: Option<&Value>) -> Result<Option<String>, AppError> {
     let Some(value) = value else {
         return Ok(None);
     };
     let Some(path) = value.as_str() else {
-        return Err(ToolError {
-            kind: errors::INVALID_INPUT,
-            message: "output_path must be a string".to_string(),
-        });
+        return Err(AppError::invalid_input("output_path must be a string"));
     };
     if path.trim().is_empty() {
-        return Err(ToolError {
-            kind: errors::INVALID_INPUT,
-            message: "output_path must not be empty".to_string(),
-        });
+        return Err(AppError::invalid_input("output_path must not be empty"));
     }
     Ok(Some(path.to_string()))
 }
 
-fn parse_document_spec(value: Option<&Value>) -> Result<DocumentSpec, ToolError> {
+fn parse_document_spec(value: Option<&Value>) -> Result<DocumentSpec, AppError> {
     let Some(value) = value else {
-        return Err(ToolError {
-            kind: errors::INVALID_INPUT,
-            message: "document is required".to_string(),
-        });
+        return Err(AppError::invalid_input("document is required"));
     };
     let Some(obj) = value.as_object() else {
-        return Err(ToolError {
-            kind: errors::INVALID_INPUT,
-            message: "document must be an object".to_string(),
-        });
+        return Err(AppError::invalid_input("document must be an object"));
     };
 
     let title = obj
@@ -272,15 +297,11 @@ fn parse_document_spec(value: Option<&Value>) -> Result<DocumentSpec, ToolError>
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let blocks_value = obj.get("blocks").ok_or_else(|| ToolError {
-        kind: errors::INVALID_INPUT,
-        message: "document.blocks is required".to_string(),
-    })?;
+    let blocks_value = obj
+        .get("blocks")
+        .ok_or_else(|| AppError::invalid_input("document.blocks is required"))?;
     let Some(blocks_array) = blocks_value.as_array() else {
-        return Err(ToolError {
-            kind: errors::INVALID_INPUT,
-            message: "document.blocks must be an array".to_string(),
-        });
+        return Err(AppError::invalid_input("document.blocks must be an array"));
     };
 
     let mut blocks = Vec::with_capacity(blocks_array.len());
@@ -301,31 +322,22 @@ fn parse_document_spec(value: Option<&Value>) -> Result<DocumentSpec, ToolError>
     })
 }
 
-fn parse_block(value: &Value) -> Result<BlockSpec, ToolError> {
+fn parse_block(value: &Value) -> Result<BlockSpec, AppError> {
     let Some(obj) = value.as_object() else {
-        return Err(ToolError {
-            kind: errors::INVALID_INPUT,
-            message: "block must be an object".to_string(),
-        });
+        return Err(AppError::invalid_input("block must be an object"));
     };
 
     let block_type = obj
         .get("type")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| ToolError {
-            kind: errors::INVALID_INPUT,
-            message: "block.type is required".to_string(),
-        })?;
+        .ok_or_else(|| AppError::invalid_input("block.type is required"))?;
 
     match block_type {
         "paragraph" => {
             let text = obj
                 .get("text")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "paragraph.text is required".to_string(),
-                })?
+                .ok_or_else(|| AppError::invalid_input("paragraph.text is required"))?
                 .to_string();
             let style = match obj.get("style") {
                 None => None,
@@ -337,18 +349,12 @@ fn parse_block(value: &Value) -> Result<BlockSpec, ToolError> {
             let level = obj
                 .get("level")
                 .and_then(|v| v.as_u64())
-                .ok_or_else(|| ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "heading.level is required".to_string(),
-                })?;
+                .ok_or_else(|| AppError::invalid_input("heading.level is required"))?;
             let level_u8 = u8::try_from(level).unwrap_or(1).clamp(1, 6);
             let text = obj
                 .get("text")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "heading.text is required".to_string(),
-                })?
+                .ok_or_else(|| AppError::invalid_input("heading.text is required"))?
                 .to_string();
             Ok(BlockSpec::Heading {
                 level: level_u8,
@@ -356,24 +362,17 @@ fn parse_block(value: &Value) -> Result<BlockSpec, ToolError> {
             })
         }
         "table" => {
-            let rows_value = obj.get("rows").ok_or_else(|| ToolError {
-                kind: errors::INVALID_INPUT,
-                message: "table.rows is required".to_string(),
-            })?;
+            let rows_value = obj
+                .get("rows")
+                .ok_or_else(|| AppError::invalid_input("table.rows is required"))?;
             let Some(rows_array) = rows_value.as_array() else {
-                return Err(ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "table.rows must be an array".to_string(),
-                });
+                return Err(AppError::invalid_input("table.rows must be an array"));
             };
 
             let mut rows: Vec<Vec<TableCellSpec>> = Vec::with_capacity(rows_array.len());
             for row_value in rows_array {
                 let Some(cols_array) = row_value.as_array() else {
-                    return Err(ToolError {
-                        kind: errors::INVALID_INPUT,
-                        message: "table.rows items must be arrays".to_string(),
-                    });
+                    return Err(AppError::invalid_input("table.rows items must be arrays"));
                 };
                 let mut row: Vec<TableCellSpec> = Vec::with_capacity(cols_array.len());
                 for cell in cols_array {
@@ -384,23 +383,16 @@ fn parse_block(value: &Value) -> Result<BlockSpec, ToolError> {
             }
 
             if rows.is_empty() {
-                return Err(ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "table.rows must not be empty".to_string(),
-                });
+                return Err(AppError::invalid_input("table.rows must not be empty"));
             }
             let cols = rows[0].len();
             if cols == 0 {
-                return Err(ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "table must have at least 1 column".to_string(),
-                });
+                return Err(AppError::invalid_input("table must have at least 1 column"));
             }
             if rows.iter().any(|r| r.len() != cols) {
-                return Err(ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "all table rows must have the same column count".to_string(),
-                });
+                return Err(AppError::invalid_input(
+                    "all table rows must have the same column count",
+                ));
             }
 
             let header_row = obj
@@ -471,18 +463,14 @@ fn parse_block(value: &Value) -> Result<BlockSpec, ToolError> {
                 let mime_type = obj
                     .get("mimeType")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| ToolError {
-                        kind: errors::INVALID_INPUT,
-                        message: "image.mimeType is required when using data_base64".to_string(),
+                    .ok_or_else(|| {
+                        AppError::invalid_input("image.mimeType is required when using data_base64")
                     })?
                     .to_string();
 
-                let data = STANDARD
-                    .decode(data_base64.as_bytes())
-                    .map_err(|_| ToolError {
-                        kind: errors::INVALID_INPUT,
-                        message: "image.data_base64 must be valid base64".to_string(),
-                    })?;
+                let data = STANDARD.decode(data_base64.as_bytes()).map_err(|_| {
+                    AppError::invalid_input("image.data_base64 must be valid base64")
+                })?;
 
                 Ok(BlockSpec::Image {
                     source: ImageSource::Base64 { data, mime_type },
@@ -493,23 +481,18 @@ fn parse_block(value: &Value) -> Result<BlockSpec, ToolError> {
                     wrap_text,
                 })
             } else {
-                Err(ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "image requires either 'path' (file path) or 'data_base64' (base64 encoded data)".to_string(),
-                })
+                Err(AppError::invalid_input(
+                    "image requires either 'path' (file path) or 'data_base64' (base64 encoded data)",
+                ))
             }
         }
         "page_break" => Ok(BlockSpec::PageBreak),
         "list" => {
-            let items_value = obj.get("items").ok_or_else(|| ToolError {
-                kind: errors::INVALID_INPUT,
-                message: "list.items is required".to_string(),
-            })?;
+            let items_value = obj
+                .get("items")
+                .ok_or_else(|| AppError::invalid_input("list.items is required"))?;
             let Some(items_array) = items_value.as_array() else {
-                return Err(ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "list.items must be an array".to_string(),
-                });
+                return Err(AppError::invalid_input("list.items must be an array"));
             };
             let items: Vec<String> = items_array
                 .iter()
@@ -538,19 +521,15 @@ fn parse_block(value: &Value) -> Result<BlockSpec, ToolError> {
             };
             Ok(BlockSpec::List { items, list_type })
         }
-        _ => Err(ToolError {
-            kind: errors::INVALID_INPUT,
-            message: format!("unsupported block.type: {block_type}"),
-        }),
+        _ => Err(AppError::invalid_input(format!(
+            "unsupported block.type: {block_type}"
+        ))),
     }
 }
 
-fn parse_text_style(value: &Value) -> Result<TextStyleSpec, ToolError> {
+fn parse_text_style(value: &Value) -> Result<TextStyleSpec, AppError> {
     let Some(obj) = value.as_object() else {
-        return Err(ToolError {
-            kind: errors::INVALID_INPUT,
-            message: "style must be an object".to_string(),
-        });
+        return Err(AppError::invalid_input("style must be an object"));
     };
     let font_name = obj
         .get("font_name")
@@ -570,15 +549,9 @@ fn parse_text_style(value: &Value) -> Result<TextStyleSpec, ToolError> {
         None => None,
         Some(v) => {
             let Some(s) = v.as_str() else {
-                return Err(ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "style.color must be a string".to_string(),
-                });
+                return Err(AppError::invalid_input("style.color must be a string"));
             };
-            Some(parse_color(s).map_err(|message| ToolError {
-                kind: errors::INVALID_INPUT,
-                message,
-            })?)
+            Some(parse_color(s).map_err(AppError::invalid_input)?)
         }
     };
 
@@ -605,7 +578,7 @@ fn parse_color(value: &str) -> Result<u32, String> {
     u32::from_str_radix(hex, 16).map_err(|_| "style.color must be valid hex".to_string())
 }
 
-fn parse_table_cell(value: &Value) -> Result<TableCellSpec, ToolError> {
+fn parse_table_cell(value: &Value) -> Result<TableCellSpec, AppError> {
     if let Some(text) = value.as_str() {
         return Ok(TableCellSpec {
             content: text.to_string(),
@@ -618,10 +591,9 @@ fn parse_table_cell(value: &Value) -> Result<TableCellSpec, ToolError> {
     }
 
     let Some(obj) = value.as_object() else {
-        return Err(ToolError {
-            kind: errors::INVALID_INPUT,
-            message: "table cell must be a string or an object".to_string(),
-        });
+        return Err(AppError::invalid_input(
+            "table cell must be a string or an object",
+        ));
     };
 
     let content = obj
@@ -641,15 +613,11 @@ fn parse_table_cell(value: &Value) -> Result<TableCellSpec, ToolError> {
         None => None,
         Some(v) => {
             let Some(s) = v.as_str() else {
-                return Err(ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "cell.background_color must be a string".to_string(),
-                });
+                return Err(AppError::invalid_input(
+                    "cell.background_color must be a string",
+                ));
             };
-            Some(parse_color(s).map_err(|message| ToolError {
-                kind: errors::INVALID_INPUT,
-                message,
-            })?)
+            Some(parse_color(s).map_err(AppError::invalid_input)?)
         }
     };
     let text_align = obj
@@ -676,7 +644,7 @@ fn parse_table_cell(value: &Value) -> Result<TableCellSpec, ToolError> {
     })
 }
 
-fn build_hwp(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec<u8>, ToolError> {
+fn build_hwp(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec<u8>, AppError> {
     use hwpers::writer::style as hwp_style;
 
     let mut writer = HwpWriter::new();
@@ -786,11 +754,9 @@ fn build_hwp(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec<
                                 row_span as u16,
                                 col_span as u16,
                             );
-                        } else if cell.row_span.is_some() {
-                            let row_span = cell.row_span.unwrap();
+                        } else if let Some(row_span) = cell.row_span {
                             builder = builder.merge_cells(r as u32, c as u32, row_span as u16, 1);
-                        } else if cell.col_span.is_some() {
-                            let col_span = cell.col_span.unwrap();
+                        } else if let Some(col_span) = cell.col_span {
                             builder = builder.merge_cells(r as u32, c as u32, 1, col_span as u16);
                         }
 
@@ -835,18 +801,16 @@ fn build_hwp(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec<
                             "image/gif" => hwp_style::ImageFormat::Gif,
                             "image/bmp" => hwp_style::ImageFormat::Bmp,
                             _ => {
-                                return Err(ToolError {
-                                    kind: errors::INVALID_INPUT,
-                                    message: format!("unsupported image mimeType: {mime_type}"),
-                                });
+                                return Err(AppError::invalid_input(format!(
+                                    "unsupported image mimeType: {mime_type}"
+                                )));
                             }
                         };
                         (data.clone(), format)
                     }
                     ImageSource::File { path } => {
-                        let data = fs::read(path).map_err(|err| ToolError {
-                            kind: errors::INVALID_INPUT,
-                            message: format!("failed to read image file: {err}"),
+                        let data = fs::read(path).map_err(|err| {
+                            AppError::invalid_input(format!("failed to read image file: {err}"))
                         })?;
                         let format = if data.len() >= 8 {
                             if data.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
@@ -863,9 +827,8 @@ fn build_hwp(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec<
                         } else {
                             None
                         }
-                        .ok_or_else(|| ToolError {
-                            kind: errors::INVALID_INPUT,
-                            message: "unable to detect image format from file".to_string(),
+                        .ok_or_else(|| {
+                            AppError::invalid_input("unable to detect image format from file")
                         })?;
                         (data, format)
                     }
@@ -925,7 +888,7 @@ fn build_hwp(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec<
         .map_err(|error| map_hwp_error_with_stage(error, "write document"))
 }
 
-fn build_hwpx(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec<u8>, ToolError> {
+fn build_hwpx(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec<u8>, AppError> {
     use hwpers::hwpx::{HwpxImage, HwpxTable, HwpxTextStyle};
 
     let mut writer = HwpxWriter::new();
@@ -1053,16 +1016,13 @@ fn build_hwpx(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec
             } => {
                 let data = match source {
                     ImageSource::Base64 { data, .. } => data.clone(),
-                    ImageSource::File { path } => fs::read(path).map_err(|err| ToolError {
-                        kind: errors::INVALID_INPUT,
-                        message: format!("failed to read image file: {err}"),
+                    ImageSource::File { path } => fs::read(path).map_err(|err| {
+                        AppError::invalid_input(format!("failed to read image file: {err}"))
                     })?,
                 };
 
-                let mut image = HwpxImage::from_bytes(data).ok_or_else(|| ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "unsupported image format bytes".to_string(),
-                })?;
+                let mut image = HwpxImage::from_bytes(data)
+                    .ok_or_else(|| AppError::invalid_input("unsupported image format bytes"))?;
 
                 if let (Some(w), Some(h)) = (width_mm, height_mm) {
                     image = image.with_size(*w, *h);
@@ -1118,75 +1078,104 @@ fn build_hwpx(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec
         .map_err(|error| map_hwp_error_with_stage(error, "write document"))
 }
 
-fn write_output(path: &str, bytes: &[u8]) -> Result<OutputResource, ToolError> {
-    fs::write(path, bytes).map_err(|err| ToolError {
-        kind: errors::INTERNAL_ERROR,
-        message: format!("failed to write output: {err}"),
-    })?;
-
-    let uri = format!("file://{path}");
-    let name = Path::new(path)
-        .file_name()
-        .and_then(|value| value.to_str())
-        .unwrap_or("document");
-
-    let content = vec![
-        json!({
-            "type": "text",
-            "text": format!("document written to {path}")
-        }),
-        json!({
-            "type": "resource_link",
-            "uri": uri,
-            "name": name,
-            "mimeType": "application/octet-stream"
-        }),
-    ];
-
-    Ok(OutputResource {
-        path: path.to_string(),
-        uri: format!("file://{path}"),
-        content,
-    })
+fn write_output(path: &str, bytes: &[u8]) -> Result<(), AppError> {
+    fs::write(path, bytes)
+        .map_err(|err| AppError::internal(format!("failed to write output: {err}")))?;
+    Ok(())
 }
 
-fn map_hwp_error(error: HwpError) -> ToolError {
+fn map_hwp_error(error: HwpError) -> AppError {
     match error {
         HwpError::UnsupportedVersion(message) => {
             if message.contains("Password-encrypted") {
-                ToolError {
-                    kind: errors::ENCRYPTED,
-                    message,
-                }
+                AppError::encrypted(message)
             } else {
-                ToolError {
-                    kind: errors::PARSE_FAILED,
-                    message,
-                }
+                AppError::parse_failed(message)
             }
         }
-        HwpError::InvalidInput(message) => ToolError {
-            kind: errors::INVALID_INPUT,
-            message,
-        },
-        HwpError::Io(err) => ToolError {
-            kind: errors::INVALID_INPUT,
-            message: err.to_string(),
-        },
+        HwpError::InvalidInput(message) => AppError::invalid_input(message),
+        HwpError::Io(err) => AppError::invalid_input(err.to_string()),
         HwpError::InvalidFormat(message)
         | HwpError::Cfb(message)
         | HwpError::CompressionError(message)
         | HwpError::ParseError(message)
         | HwpError::EncodingError(message)
-        | HwpError::NotFound(message) => ToolError {
-            kind: errors::PARSE_FAILED,
-            message,
-        },
+        | HwpError::NotFound(message) => AppError::parse_failed(message),
     }
 }
 
-fn map_hwp_error_with_stage(error: HwpError, stage: &str) -> ToolError {
+fn map_hwp_error_with_stage(error: HwpError, stage: &str) -> AppError {
     let mut mapped = map_hwp_error(error);
     mapped.message = format!("{stage} failed: {}", mapped.message);
     mapped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn request_from_value_uses_hwp_default_and_parses_document() {
+        let req = request_from_value(&json!({
+            "document": {
+                "title": "Rich",
+                "blocks": [
+                    { "type": "paragraph", "text": "hello" }
+                ]
+            }
+        }))
+        .expect("request parsed");
+
+        assert_eq!(req.to.as_str(), "hwp");
+        assert!(req.output_path.is_none());
+        assert_eq!(req.document.title.as_deref(), Some("Rich"));
+        assert_eq!(req.document.blocks.len(), 1);
+    }
+
+    #[test]
+    fn run_and_call_preserve_inline_response_shape() {
+        let req = request_from_value(&json!({
+            "to": "hwp",
+            "document": {
+                "blocks": [
+                    { "type": "paragraph", "text": "hello" }
+                ]
+            }
+        }))
+        .expect("request parsed");
+
+        let response = run(req).expect("run succeeded");
+        assert!(response.file.is_none());
+        assert!(response.output.bytes_len > 0);
+        assert!(response.warnings.is_empty());
+
+        let wrapped = call(&json!({
+            "to": "hwp",
+            "document": {
+                "blocks": [
+                    { "type": "paragraph", "text": "hello" }
+                ]
+            }
+        }));
+
+        assert_eq!(
+            wrapped.get("isError").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            wrapped
+                .get("structuredContent")
+                .and_then(|v| v.get("to"))
+                .and_then(|v| v.as_str()),
+            Some("hwp")
+        );
+        assert!(
+            wrapped
+                .get("structuredContent")
+                .and_then(|v| v.get("base64"))
+                .and_then(|v| v.as_str())
+                .is_some()
+        );
+    }
 }

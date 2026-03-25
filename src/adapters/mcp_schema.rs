@@ -11,10 +11,50 @@ pub const TOOL_CREATE_DOCUMENT: &str = "hwp.create_document";
 pub const TOOL_CREATE_RICH_DOCUMENT: &str = "hwp.create_rich_document";
 pub const TOOL_EXTRACT_RICH: &str = "hwp.extract_rich";
 
-pub const MAX_INPUT_BYTES: u64 = 50 * 1024 * 1024;
-pub const MAX_OUTPUT_BYTES: u64 = 20 * 1024 * 1024;
-pub const MAX_SVG_OUTPUT_BYTES: u64 = 50 * 1024 * 1024;
-pub const MAX_PARSE_MS: u64 = 10_000;
+pub fn tool_definitions() -> Vec<serde_json::Value> {
+    vec![
+        json!({
+            "name": TOOL_EXTRACT_TEXT,
+            "description": "Extract plain text from HWP documents.",
+            "inputSchema": extract_text_schema()
+        }),
+        json!({
+            "name": TOOL_INSPECT_METADATA,
+            "description": "Inspect metadata from HWP documents.",
+            "inputSchema": inspect_metadata_schema()
+        }),
+        json!({
+            "name": TOOL_SUMMARIZE_STRUCTURE,
+            "description": "Summarize document structure for HWP documents.",
+            "inputSchema": summarize_structure_schema()
+        }),
+        json!({
+            "name": TOOL_RENDER_SVG,
+            "description": "Render HWP pages or elements into SVG.",
+            "inputSchema": render_svg_schema()
+        }),
+        json!({
+            "name": TOOL_CONVERT,
+            "description": "Convert HWP documents between formats.",
+            "inputSchema": convert_schema()
+        }),
+        json!({
+            "name": TOOL_CREATE_DOCUMENT,
+            "description": "Create new HWP documents from text.",
+            "inputSchema": create_document_schema()
+        }),
+        json!({
+            "name": TOOL_CREATE_RICH_DOCUMENT,
+            "description": "Create a rich HWP/HWPX document from a block-based JSON spec.",
+            "inputSchema": create_rich_document_schema()
+        }),
+        json!({
+            "name": TOOL_EXTRACT_RICH,
+            "description": "Extract a rich block structure from HWP/HWPX documents.",
+            "inputSchema": extract_rich_schema()
+        }),
+    ]
+}
 
 pub fn extract_text_schema() -> serde_json::Value {
     json!({
@@ -134,14 +174,6 @@ pub fn create_rich_document_schema() -> serde_json::Value {
                 "properties": {
                     "title": { "type": "string" },
                     "author": { "type": "string" },
-                    "page": {
-                        "type": "object",
-                        "properties": {
-                            "size": { "type": "string", "enum": ["a4"] },
-                            "orientation": { "type": "string", "enum": ["portrait", "landscape"] }
-                        },
-                        "additionalProperties": false
-                    },
                     "header": { "type": "string" },
                     "footer": { "type": "string" },
                     "blocks": {
@@ -153,18 +185,7 @@ pub fn create_rich_document_schema() -> serde_json::Value {
                                     "properties": {
                                         "type": { "const": "paragraph" },
                                         "text": { "type": "string" },
-                                        "style": {
-                                            "type": "object",
-                                            "properties": {
-                                                "font_name": { "type": "string" },
-                                                "font_size": { "type": "integer", "minimum": 1 },
-                                                "bold": { "type": "boolean" },
-                                                "italic": { "type": "boolean" },
-                                                "underline": { "type": "boolean" },
-                                                "color": { "type": "string", "description": "0xRRGGBB (hex), e.g. 0xFF0000" }
-                                            },
-                                            "additionalProperties": false
-                                        }
+                                        "style": text_style_schema()
                                     },
                                     "required": ["type", "text"],
                                     "additionalProperties": false
@@ -187,10 +208,18 @@ pub fn create_rich_document_schema() -> serde_json::Value {
                                             "type": "array",
                                             "items": {
                                                 "type": "array",
-                                                "items": { "type": "string" }
+                                                "items": table_cell_schema()
                                             }
                                         },
-                                        "header_row": { "type": "boolean" }
+                                        "header_row": { "type": "boolean" },
+                                        "column_widths": {
+                                            "type": "array",
+                                            "items": { "type": "integer", "minimum": 0 }
+                                        },
+                                        "border_style": {
+                                            "type": "string",
+                                            "enum": ["none", "basic", "full"]
+                                        }
                                     },
                                     "required": ["type", "rows"],
                                     "additionalProperties": false
@@ -199,13 +228,51 @@ pub fn create_rich_document_schema() -> serde_json::Value {
                                     "type": "object",
                                     "properties": {
                                         "type": { "const": "image" },
+                                        "path": { "type": "string" },
                                         "data_base64": { "type": "string" },
-                                        "mimeType": { "type": "string", "enum": ["image/png", "image/jpeg", "image/gif", "image/bmp"] },
+                                        "mimeType": {
+                                            "type": "string",
+                                            "enum": ["image/png", "image/jpeg", "image/gif", "image/bmp"]
+                                        },
                                         "width_mm": { "type": "integer", "minimum": 1 },
                                         "height_mm": { "type": "integer", "minimum": 1 },
-                                        "caption": { "type": "string" }
+                                        "caption": { "type": "string" },
+                                        "align": {
+                                            "type": "string",
+                                            "enum": ["left", "center", "right", "inline"]
+                                        },
+                                        "wrap_text": { "type": "boolean" }
                                     },
-                                    "required": ["type", "data_base64", "mimeType"],
+                                    "required": ["type"],
+                                    "oneOf": [
+                                        { "required": ["path"] },
+                                        { "required": ["data_base64", "mimeType"] }
+                                    ],
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "const": "list" },
+                                        "items": {
+                                            "type": "array",
+                                            "items": { "type": "string" }
+                                        },
+                                        "ordered": { "type": "boolean" },
+                                        "list_type": {
+                                            "type": "string",
+                                            "enum": ["bullet", "numbered", "alphabetic", "roman", "korean"]
+                                        }
+                                    },
+                                    "required": ["type", "items"],
+                                    "additionalProperties": false
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "const": "page_break" }
+                                    },
+                                    "required": ["type"],
                                     "additionalProperties": false
                                 }
                             ]
@@ -221,6 +288,44 @@ pub fn create_rich_document_schema() -> serde_json::Value {
     })
 }
 
+fn text_style_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "font_name": { "type": "string" },
+            "font_size": { "type": "integer", "minimum": 1 },
+            "bold": { "type": "boolean" },
+            "italic": { "type": "boolean" },
+            "underline": { "type": "boolean" },
+            "color": { "type": "string", "description": "0xRRGGBB or #RRGGBB" }
+        },
+        "additionalProperties": false
+    })
+}
+
+fn table_cell_schema() -> serde_json::Value {
+    json!({
+        "oneOf": [
+            { "type": "string" },
+            {
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string" },
+                    "row_span": { "type": "integer", "minimum": 1 },
+                    "col_span": { "type": "integer", "minimum": 1 },
+                    "background_color": { "type": "string", "description": "0xRRGGBB or #RRGGBB" },
+                    "text_align": {
+                        "type": "string",
+                        "enum": ["left", "center", "right"]
+                    },
+                    "style": text_style_schema()
+                },
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
 pub fn extract_rich_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -229,7 +334,8 @@ pub fn extract_rich_schema() -> serde_json::Value {
             "base64": { "type": "string" },
             "format": { "type": "string", "enum": ["auto", "hwp", "hwpx"] },
             "images": { "type": "string", "enum": ["none", "metadata", "inline", "resource"], "default": "metadata" },
-            "max_image_bytes": { "type": "integer", "minimum": 0 }
+            "max_image_bytes": { "type": "integer", "minimum": 0 },
+            "output_path": { "type": "string" }
         },
         "oneOf": [
             { "required": ["path"] },
