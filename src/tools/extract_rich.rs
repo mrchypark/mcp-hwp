@@ -1,39 +1,54 @@
-use crate::input::{InputFormat, load_input};
-use crate::mcp::contracts::MAX_OUTPUT_BYTES;
-use crate::mcp::errors;
+use crate::constants::MAX_OUTPUT_BYTES;
+use crate::errors::AppError;
+use crate::input::{InputFormat, InputPayload, load_input};
 use crate::tools::error_result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use hwpers::model::bin_data::BinData;
 use hwpers::{HwpError, HwpReader, HwpxReader};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub fn call(args: &Value) -> Value {
-    let payload = match load_input(args) {
-        Ok(payload) => payload,
-        Err(err) => return error_result(err.kind, err.message, None),
-    };
+#[derive(Debug, Clone)]
+pub struct Request {
+    pub payload: InputPayload,
+    pub images: String,
+    pub max_image_bytes: u64,
+    pub output_path: Option<String>,
+}
 
-    let images_mode = args
-        .get("images")
-        .and_then(|v| v.as_str())
-        .unwrap_or("metadata");
-    let max_image_bytes = args
-        .get("max_image_bytes")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
-    let output_path = args
-        .get("output_path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Response {
+    pub format: String,
+    pub blocks: Vec<Value>,
+    pub warnings: Vec<String>,
+}
 
-    let parsed = match parse_document(&payload.bytes, payload.format) {
-        Ok(parsed) => parsed,
-        Err(err) => return error_result(err.kind, err.message, Some(payload.source.as_str())),
-    };
+pub fn request_from_value(args: &Value) -> Result<Request, AppError> {
+    let payload = load_input(args)?;
+    Ok(Request {
+        payload,
+        images: args
+            .get("images")
+            .and_then(|v| v.as_str())
+            .unwrap_or("metadata")
+            .to_string(),
+        max_image_bytes: args
+            .get("max_image_bytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        output_path: args
+            .get("output_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
+pub fn run(req: Request) -> Result<Response, AppError> {
+    let parsed = parse_document(&req.payload.bytes, req.payload.format)?;
 
     let mut warnings = parsed.warnings;
     let mut blocks: Vec<Value> = Vec::new();
@@ -124,27 +139,23 @@ pub fn call(args: &Value) -> Value {
                             .map(|s| s.trim().to_string());
 
                         let mut image_ctx = ImageRenderContext {
-                            images_mode,
-                            max_image_bytes,
+                            images_mode: req.images.as_str(),
+                            max_image_bytes: req.max_image_bytes,
                             total_inline_image_bytes: &mut total_inline_image_bytes,
-                            source: &payload.source,
                             warnings: &mut warnings,
-                            output_path: &output_path,
+                            output_path: &req.output_path,
                         };
 
                         if image_cursor < images.len() {
                             let bin = images[image_cursor];
                             image_cursor += 1;
-                            let block = match image_block_from_bin(
+                            let block = image_block_from_bin(
                                 section_index,
                                 i,
                                 bin,
                                 caption,
                                 &mut image_ctx,
-                            ) {
-                                Ok(block) => block,
-                                Err(tool_result) => return tool_result,
-                            };
+                            )?;
                             blocks.push(block);
                         } else {
                             warnings.push(
@@ -239,27 +250,18 @@ pub fn call(args: &Value) -> Value {
                     .map(|s| s.trim().to_string());
 
                 let mut image_ctx = ImageRenderContext {
-                    images_mode,
-                    max_image_bytes,
+                    images_mode: req.images.as_str(),
+                    max_image_bytes: req.max_image_bytes,
                     total_inline_image_bytes: &mut total_inline_image_bytes,
-                    source: &payload.source,
                     warnings: &mut warnings,
-                    output_path: &output_path,
+                    output_path: &req.output_path,
                 };
 
                 if image_cursor < images.len() {
                     let bin = images[image_cursor];
                     image_cursor += 1;
-                    let block = match image_block_from_bin(
-                        section_index,
-                        i,
-                        bin,
-                        caption,
-                        &mut image_ctx,
-                    ) {
-                        Ok(block) => block,
-                        Err(tool_result) => return tool_result,
-                    };
+                    let block =
+                        image_block_from_bin(section_index, i, bin, caption, &mut image_ctx)?;
                     blocks.push(block);
                     i += 1;
                     continue;
@@ -282,17 +284,13 @@ pub fn call(args: &Value) -> Value {
         image_cursor += 1;
 
         let mut image_ctx = ImageRenderContext {
-            images_mode,
-            max_image_bytes,
+            images_mode: req.images.as_str(),
+            max_image_bytes: req.max_image_bytes,
             total_inline_image_bytes: &mut total_inline_image_bytes,
-            source: &payload.source,
             warnings: &mut warnings,
-            output_path: &output_path,
+            output_path: &req.output_path,
         };
-        let block = match image_block_from_bin(0, 0, bin, None, &mut image_ctx) {
-            Ok(block) => block,
-            Err(tool_result) => return tool_result,
-        };
+        let block = image_block_from_bin(0, 0, bin, None, &mut image_ctx)?;
         let mut block = block;
         if let Some(obj) = block.as_object_mut() {
             obj.insert("placement".to_string(), json!("unanchored"));
@@ -300,23 +298,32 @@ pub fn call(args: &Value) -> Value {
         blocks.push(block);
     }
 
-    json!({
-        "content": [{
-            "type": "text",
-            "text": format!("extracted {} blocks", blocks.len())
-        }],
-        "structuredContent": {
-            "format": parsed.format.as_str(),
-            "blocks": blocks,
-            "warnings": warnings
-        },
-        "isError": false
+    Ok(Response {
+        format: parsed.format.as_str().to_string(),
+        blocks,
+        warnings,
     })
 }
 
-struct ToolError {
-    kind: &'static str,
-    message: String,
+pub fn call(args: &Value) -> Value {
+    let req = match request_from_value(args) {
+        Ok(req) => req,
+        Err(err) => return error_result(err.kind, err.message, None),
+    };
+    let source = req.payload.source.clone();
+    let response = match run(req) {
+        Ok(response) => response,
+        Err(err) => return error_result(err.kind, err.message, Some(source.as_str())),
+    };
+
+    json!({
+        "content": [{
+            "type": "text",
+            "text": format!("extracted {} blocks", response.blocks.len())
+        }],
+        "structuredContent": response,
+        "isError": false
+    })
 }
 
 struct ParsedDocument {
@@ -325,7 +332,7 @@ struct ParsedDocument {
     warnings: Vec<String>,
 }
 
-fn parse_document(bytes: &[u8], format: InputFormat) -> Result<ParsedDocument, ToolError> {
+fn parse_document(bytes: &[u8], format: InputFormat) -> Result<ParsedDocument, AppError> {
     match format {
         InputFormat::Hwp => HwpReader::from_bytes(bytes)
             .map(|document| ParsedDocument {
@@ -355,26 +362,13 @@ fn parse_document(bytes: &[u8], format: InputFormat) -> Result<ParsedDocument, T
                         format: InputFormat::Hwpx,
                         warnings: vec!["auto format: hwp parse failed; hwpx succeeded".to_string()],
                     }),
-                    Err(hwpx_err) => Err(ToolError {
-                        kind: errors::PARSE_FAILED,
-                        message: format!(
-                            "auto format parse failed (hwp: {}; hwpx: {})",
-                            hwp_err, hwpx_err
-                        ),
-                    }),
+                    Err(hwpx_err) => Err(AppError::parse_failed(format!(
+                        "auto format parse failed (hwp: {}; hwpx: {})",
+                        hwp_err, hwpx_err
+                    ))),
                 },
             }
         }
-    }
-}
-
-fn mime_from_extension(ext: &str) -> Option<&'static str> {
-    match ext.to_ascii_lowercase().as_str() {
-        "png" => Some("image/png"),
-        "jpg" | "jpeg" => Some("image/jpeg"),
-        "gif" => Some("image/gif"),
-        "bmp" => Some("image/bmp"),
-        _ => None,
     }
 }
 
@@ -416,7 +410,6 @@ struct ImageRenderContext<'a> {
     images_mode: &'a str,
     max_image_bytes: u64,
     total_inline_image_bytes: &'a mut u64,
-    source: &'a str,
     warnings: &'a mut Vec<String>,
     output_path: &'a Option<String>,
 }
@@ -427,7 +420,7 @@ fn image_block_from_bin(
     bin: &BinData,
     caption: Option<String>,
     ctx: &mut ImageRenderContext<'_>,
-) -> Result<Value, Value> {
+) -> Result<Value, AppError> {
     let bin_id = bin.bin_id;
     let bytes = match bin.get_data() {
         Ok(bytes) => bytes,
@@ -464,14 +457,10 @@ fn image_block_from_bin(
             } else {
                 *ctx.total_inline_image_bytes += bytes_len;
                 if *ctx.total_inline_image_bytes > MAX_OUTPUT_BYTES {
-                    return Err(error_result(
-                        errors::TOO_LARGE,
-                        format!(
-                            "inline images exceed output limit: {} bytes (max {MAX_OUTPUT_BYTES})",
-                            *ctx.total_inline_image_bytes
-                        ),
-                        Some(ctx.source),
-                    ));
+                    return Err(AppError::too_large(format!(
+                        "inline images exceed output limit: {} bytes (max {MAX_OUTPUT_BYTES})",
+                        *ctx.total_inline_image_bytes
+                    )));
                 }
                 if let Some(obj) = block.as_object_mut() {
                     obj.insert("base64".to_string(), json!(STANDARD.encode(&bytes)));
@@ -485,11 +474,7 @@ fn image_block_from_bin(
                 bin.extension.as_str()
             };
             let path = write_image_file(bin_id, ext, &bytes, ctx.output_path).map_err(|err| {
-                error_result(
-                    errors::INTERNAL_ERROR,
-                    format!("failed to write image bin_id={bin_id}: {err}"),
-                    Some(ctx.source),
-                )
+                AppError::internal(format!("failed to write image bin_id={bin_id}: {err}"))
             })?;
             let uri = format!("file://{}", path.to_string_lossy());
             if let Some(obj) = block.as_object_mut() {
@@ -498,15 +483,23 @@ fn image_block_from_bin(
             }
         }
         _ => {
-            return Err(error_result(
-                errors::INVALID_INPUT,
+            return Err(AppError::invalid_input(
                 "images must be none, metadata, inline, or resource",
-                Some(ctx.source),
             ));
         }
     }
 
     Ok(block)
+}
+
+fn mime_from_extension(ext: &str) -> Option<&'static str> {
+    match ext.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "bmp" => Some("image/bmp"),
+        _ => None,
+    }
 }
 
 fn write_image_file(
@@ -537,42 +530,27 @@ fn write_image_file(
     Ok(path)
 }
 
-fn map_hwp_error(error: HwpError) -> ToolError {
+fn map_hwp_error(error: HwpError) -> AppError {
     match error {
         HwpError::UnsupportedVersion(message) => {
             if message.contains("Password-encrypted") {
-                ToolError {
-                    kind: errors::ENCRYPTED,
-                    message,
-                }
+                AppError::encrypted(message)
             } else {
-                ToolError {
-                    kind: errors::PARSE_FAILED,
-                    message,
-                }
+                AppError::parse_failed(message)
             }
         }
-        HwpError::InvalidInput(message) => ToolError {
-            kind: errors::INVALID_INPUT,
-            message,
-        },
-        HwpError::Io(err) => ToolError {
-            kind: errors::INVALID_INPUT,
-            message: err.to_string(),
-        },
+        HwpError::InvalidInput(message) => AppError::invalid_input(message),
+        HwpError::Io(err) => AppError::invalid_input(err.to_string()),
         HwpError::InvalidFormat(message)
         | HwpError::Cfb(message)
         | HwpError::CompressionError(message)
         | HwpError::ParseError(message)
         | HwpError::EncodingError(message)
-        | HwpError::NotFound(message) => ToolError {
-            kind: errors::PARSE_FAILED,
-            message,
-        },
+        | HwpError::NotFound(message) => AppError::parse_failed(message),
     }
 }
 
-fn map_hwp_error_with_format(error: HwpError, format: &str) -> ToolError {
+fn map_hwp_error_with_format(error: HwpError, format: &str) -> AppError {
     let mut mapped = map_hwp_error(error);
     mapped.message = format!("{format} parse failed: {}", mapped.message);
     mapped

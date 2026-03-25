@@ -1,9 +1,8 @@
-use crate::mcp::contracts::MAX_INPUT_BYTES;
-use crate::mcp::errors;
+use crate::constants::MAX_INPUT_BYTES;
+use crate::errors::AppError;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
-use std::fmt;
 use std::fs;
 use std::path::Path;
 
@@ -15,18 +14,18 @@ pub enum InputFormat {
 }
 
 impl InputFormat {
-    fn parse(value: Option<&Value>) -> Result<Self, InputError> {
+    fn parse(value: Option<&Value>) -> Result<Self, AppError> {
         let Some(value) = value else {
             return Ok(InputFormat::Auto);
         };
         let Some(value) = value.as_str() else {
-            return Err(InputError::invalid_input("format must be a string"));
+            return Err(AppError::invalid_input("format must be a string"));
         };
         match value {
             "auto" => Ok(InputFormat::Auto),
             "hwp" => Ok(InputFormat::Hwp),
             "hwpx" => Ok(InputFormat::Hwpx),
-            _ => Err(InputError::unsupported_format(
+            _ => Err(AppError::unsupported_format(
                 "format must be auto, hwp, or hwpx",
             )),
         }
@@ -48,57 +47,20 @@ pub struct InputPayload {
     pub source: String,
 }
 
-#[derive(Debug, Clone)]
-pub struct InputError {
-    pub kind: &'static str,
-    pub message: String,
-}
-
-impl InputError {
-    fn new(kind: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-        }
-    }
-
-    fn invalid_input(message: impl Into<String>) -> Self {
-        Self::new(errors::INVALID_INPUT, message)
-    }
-
-    fn too_large(message: impl Into<String>) -> Self {
-        Self::new(errors::TOO_LARGE, message)
-    }
-
-    fn unsupported_format(message: impl Into<String>) -> Self {
-        Self::new(errors::UNSUPPORTED_FORMAT, message)
-    }
-}
-
-impl fmt::Display for InputError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}: {}", self.kind, self.message)
-    }
-}
-
-impl std::error::Error for InputError {}
-
-pub fn load_input(args: &Value) -> Result<InputPayload, InputError> {
+pub fn load_input(args: &Value) -> Result<InputPayload, AppError> {
     let obj = args
         .as_object()
-        .ok_or_else(|| InputError::invalid_input("arguments must be an object"))?;
+        .ok_or_else(|| AppError::invalid_input("arguments must be an object"))?;
 
     let path_value = obj.get("path");
     let base64_value = obj.get("base64");
 
     match (path_value, base64_value) {
         (None, None) => {
-            return Err(InputError::invalid_input(
-                "either path or base64 is required",
-            ));
+            return Err(AppError::invalid_input("either path or base64 is required"));
         }
         (Some(_), Some(_)) => {
-            return Err(InputError::invalid_input(
+            return Err(AppError::invalid_input(
                 "path and base64 cannot both be set",
             ));
         }
@@ -110,21 +72,21 @@ pub fn load_input(args: &Value) -> Result<InputPayload, InputError> {
     if let Some(value) = path_value {
         let path = value
             .as_str()
-            .ok_or_else(|| InputError::invalid_input("path must be a string"))?;
+            .ok_or_else(|| AppError::invalid_input("path must be a string"))?;
         let path_ref = Path::new(path);
         let metadata = fs::metadata(path_ref)
-            .map_err(|_| InputError::invalid_input("path must exist and be a file"))?;
+            .map_err(|_| AppError::invalid_input("path must exist and be a file"))?;
         if !metadata.is_file() {
-            return Err(InputError::invalid_input("path must be a file"));
+            return Err(AppError::invalid_input("path must be a file"));
         }
         let len = metadata.len();
         if len > MAX_INPUT_BYTES {
-            return Err(InputError::too_large(format!(
+            return Err(AppError::too_large(format!(
                 "input exceeds limit: {len} bytes (max {MAX_INPUT_BYTES})"
             )));
         }
         let bytes = fs::read(path_ref)
-            .map_err(|_| InputError::invalid_input("failed to read path contents"))?;
+            .map_err(|_| AppError::invalid_input("failed to read path contents"))?;
         return Ok(InputPayload {
             bytes,
             format,
@@ -135,12 +97,12 @@ pub fn load_input(args: &Value) -> Result<InputPayload, InputError> {
     let value = base64_value.expect("base64 must be present here");
     let base64_str = value
         .as_str()
-        .ok_or_else(|| InputError::invalid_input("base64 must be a string"))?;
+        .ok_or_else(|| AppError::invalid_input("base64 must be a string"))?;
     let bytes = STANDARD
         .decode(base64_str.as_bytes())
-        .map_err(|_| InputError::invalid_input("base64 must be valid"))?;
+        .map_err(|_| AppError::invalid_input("base64 must be valid"))?;
     if bytes.len() as u64 > MAX_INPUT_BYTES {
-        return Err(InputError::too_large(format!(
+        return Err(AppError::too_large(format!(
             "input exceeds limit: {} bytes (max {MAX_INPUT_BYTES})",
             bytes.len()
         )));
@@ -155,6 +117,7 @@ pub fn load_input(args: &Value) -> Result<InputPayload, InputError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors;
     use serde_json::json;
     use std::fs::File;
     use tempfile::tempdir;

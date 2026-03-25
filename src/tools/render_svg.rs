@@ -1,6 +1,6 @@
+use crate::constants::MAX_SVG_OUTPUT_BYTES;
+use crate::errors::AppError;
 use crate::input::{InputFormat, load_input};
-use crate::mcp::contracts::MAX_SVG_OUTPUT_BYTES;
-use crate::mcp::errors;
 use crate::tools::error_result;
 use hwpers::render::renderer::{HwpRenderer, RenderOptions};
 use hwpers::{HwpError, HwpReader, HwpxReader};
@@ -9,28 +9,53 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone)]
+pub struct Request {
+    pub payload: crate::input::InputPayload,
+    pub pages: Vec<u64>,
+    pub output: OutputMode,
+}
+
+#[derive(Debug, Clone)]
+pub struct Response {
+    pub content: Vec<Value>,
+    pub structured_content: Value,
+}
+
 pub fn call(args: &Value) -> Value {
-    let payload = match load_input(args) {
-        Ok(payload) => payload,
+    let req = match request_from_value(args) {
+        Ok(req) => req,
         Err(err) => return error_result(err.kind, err.message, None),
     };
-
-    let pages = match parse_pages(args) {
-        Ok(pages) => pages,
-        Err(err) => return error_result(err.kind, err.message, None),
+    let source = req.payload.source.clone();
+    let response = match run(req) {
+        Ok(response) => response,
+        Err(err) => return error_result(err.kind, err.message, Some(source.as_str())),
     };
 
-    let output = match OutputMode::parse(args.get("output")) {
-        Ok(output) => output,
-        Err(err) => return error_result(err.kind, err.message, None),
-    };
+    json!({
+        "content": response.content,
+        "structuredContent": response.structured_content,
+        "isError": false
+    })
+}
 
-    let mut parsed = match parse_document(&payload.bytes, payload.format) {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            return error_result(err.kind, err.message, Some(payload.source.as_str()));
-        }
-    };
+pub fn request_from_value(args: &Value) -> Result<Request, AppError> {
+    Ok(Request {
+        payload: load_input(args)?,
+        pages: parse_pages(args)?,
+        output: OutputMode::parse(args.get("output"))?,
+    })
+}
+
+pub fn run(req: Request) -> Result<Response, AppError> {
+    let Request {
+        payload,
+        pages,
+        output,
+    } = req;
+
+    let mut parsed = parse_document(&payload.bytes, payload.format)?;
 
     if ensure_page_defs(&mut parsed.document) {
         parsed
@@ -43,30 +68,22 @@ pub fn call(args: &Value) -> Value {
 
     let mut rendered_pages = Vec::new();
     for page in pages {
-        let page_index = match usize::try_from(page.saturating_sub(1)) {
-            Ok(index) => index,
-            Err(_) => return error_result(errors::INVALID_INPUT, "page index out of range", None),
-        };
+        let page_index = usize::try_from(page.saturating_sub(1))
+            .map_err(|_| AppError::invalid_input("page index out of range"))?;
         let Some(svg) = render_result.to_svg(page_index) else {
-            return error_result(
-                errors::INVALID_INPUT,
-                format!("page out of range: {page}"),
-                None,
-            );
+            return Err(AppError::invalid_input(format!(
+                "page out of range: {page}"
+            )));
         };
         rendered_pages.push(RenderedPage { page, svg });
     }
 
-    if let Err(err) = enforce_size_limit(&rendered_pages) {
-        return error_result(err.kind, err.message, None);
-    }
+    enforce_size_limit(&rendered_pages)?;
 
-    let structured_pages = match output {
+    let output_mode = output.clone();
+    let structured_pages = match output_mode {
         OutputMode::Inline => render_inline(&rendered_pages),
-        OutputMode::Resource => match render_resource(&rendered_pages) {
-            Ok(pages) => pages,
-            Err(err) => return error_result(err.kind, err.message, None),
-        },
+        OutputMode::Resource => render_resource(&rendered_pages)?,
     };
 
     let content = match output {
@@ -77,20 +94,14 @@ pub fn call(args: &Value) -> Value {
         OutputMode::Resource => build_resource_content(&structured_pages),
     };
 
-    json!({
-        "content": content,
-        "structuredContent": {
+    Ok(Response {
+        content,
+        structured_content: json!({
             "format": parsed.format.as_str(),
             "pages": structured_pages,
             "warnings": parsed.warnings
-        },
-        "isError": false
+        }),
     })
-}
-
-struct ToolError {
-    kind: &'static str,
-    message: String,
 }
 
 struct ParsedDocument {
@@ -104,34 +115,29 @@ struct RenderedPage {
     svg: String,
 }
 
-enum OutputMode {
+#[derive(Debug, Clone)]
+pub enum OutputMode {
     Inline,
     Resource,
 }
 
 impl OutputMode {
-    fn parse(value: Option<&Value>) -> Result<Self, ToolError> {
+    fn parse(value: Option<&Value>) -> Result<Self, AppError> {
         let Some(value) = value else {
             return Ok(OutputMode::Inline);
         };
         let Some(value) = value.as_str() else {
-            return Err(ToolError {
-                kind: errors::INVALID_INPUT,
-                message: "output must be a string".to_string(),
-            });
+            return Err(AppError::invalid_input("output must be a string"));
         };
         match value {
             "inline" => Ok(OutputMode::Inline),
             "resource" => Ok(OutputMode::Resource),
-            _ => Err(ToolError {
-                kind: errors::INVALID_INPUT,
-                message: "output must be inline or resource".to_string(),
-            }),
+            _ => Err(AppError::invalid_input("output must be inline or resource")),
         }
     }
 }
 
-fn parse_document(bytes: &[u8], format: InputFormat) -> Result<ParsedDocument, ToolError> {
+fn parse_document(bytes: &[u8], format: InputFormat) -> Result<ParsedDocument, AppError> {
     match format {
         InputFormat::Hwp => HwpReader::from_bytes(bytes)
             .map(|document| ParsedDocument {
@@ -161,33 +167,26 @@ fn parse_document(bytes: &[u8], format: InputFormat) -> Result<ParsedDocument, T
                         format: InputFormat::Hwpx,
                         warnings: vec!["auto format: hwp parse failed; hwpx succeeded".to_string()],
                     }),
-                    Err(hwpx_err) => Err(ToolError {
-                        kind: errors::PARSE_FAILED,
-                        message: format!(
-                            "auto format parse failed (hwp: {}; hwpx: {})",
-                            hwp_err, hwpx_err
-                        ),
-                    }),
+                    Err(hwpx_err) => Err(AppError::parse_failed(format!(
+                        "auto format parse failed (hwp: {}; hwpx: {})",
+                        hwp_err, hwpx_err
+                    ))),
                 },
             }
         }
     }
 }
 
-fn parse_pages(args: &Value) -> Result<Vec<u64>, ToolError> {
+fn parse_pages(args: &Value) -> Result<Vec<u64>, AppError> {
     let mut pages = Vec::new();
     let mut seen = HashSet::new();
 
     if let Some(value) = args.get("page") {
-        let page = value.as_u64().ok_or_else(|| ToolError {
-            kind: errors::INVALID_INPUT,
-            message: "page must be an integer".to_string(),
-        })?;
+        let page = value
+            .as_u64()
+            .ok_or_else(|| AppError::invalid_input("page must be an integer"))?;
         if page == 0 {
-            return Err(ToolError {
-                kind: errors::INVALID_INPUT,
-                message: "page must be >= 1".to_string(),
-            });
+            return Err(AppError::invalid_input("page must be >= 1"));
         }
         if seen.insert(page) {
             pages.push(page);
@@ -196,21 +195,16 @@ fn parse_pages(args: &Value) -> Result<Vec<u64>, ToolError> {
 
     if let Some(value) = args.get("pages") {
         let Some(array) = value.as_array() else {
-            return Err(ToolError {
-                kind: errors::INVALID_INPUT,
-                message: "pages must be an array of integers".to_string(),
-            });
+            return Err(AppError::invalid_input(
+                "pages must be an array of integers",
+            ));
         };
         for entry in array {
-            let page = entry.as_u64().ok_or_else(|| ToolError {
-                kind: errors::INVALID_INPUT,
-                message: "pages must be an array of integers".to_string(),
-            })?;
+            let page = entry
+                .as_u64()
+                .ok_or_else(|| AppError::invalid_input("pages must be an array of integers"))?;
             if page == 0 {
-                return Err(ToolError {
-                    kind: errors::INVALID_INPUT,
-                    message: "pages must be >= 1".to_string(),
-                });
+                return Err(AppError::invalid_input("pages must be >= 1"));
             }
             if seen.insert(page) {
                 pages.push(page);
@@ -225,13 +219,12 @@ fn parse_pages(args: &Value) -> Result<Vec<u64>, ToolError> {
     Ok(pages)
 }
 
-fn enforce_size_limit(pages: &[RenderedPage]) -> Result<(), ToolError> {
+fn enforce_size_limit(pages: &[RenderedPage]) -> Result<(), AppError> {
     let size: u64 = pages.iter().map(|page| page.svg.len() as u64).sum();
     if size > MAX_SVG_OUTPUT_BYTES {
-        return Err(ToolError {
-            kind: errors::TOO_LARGE,
-            message: format!("svg output exceeds limit: {size} bytes (max {MAX_SVG_OUTPUT_BYTES})"),
-        });
+        return Err(AppError::too_large(format!(
+            "svg output exceeds limit: {size} bytes (max {MAX_SVG_OUTPUT_BYTES})"
+        )));
     }
     Ok(())
 }
@@ -243,14 +236,12 @@ fn render_inline(pages: &[RenderedPage]) -> Vec<Value> {
         .collect()
 }
 
-fn render_resource(pages: &[RenderedPage]) -> Result<Vec<Value>, ToolError> {
+fn render_resource(pages: &[RenderedPage]) -> Result<Vec<Value>, AppError> {
     let mut output = Vec::new();
     for page in pages {
         let path = svg_path_for_page(page.page);
-        fs::write(&path, page.svg.as_bytes()).map_err(|err| ToolError {
-            kind: errors::INTERNAL_ERROR,
-            message: format!("failed to write svg output: {err}"),
-        })?;
+        fs::write(&path, page.svg.as_bytes())
+            .map_err(|err| AppError::internal(format!("failed to write svg output: {err}")))?;
         let path_string = path.to_string_lossy().to_string();
         let uri = format!("file://{path_string}");
         output.push(json!({
@@ -293,42 +284,27 @@ fn svg_path_for_page(page: u64) -> PathBuf {
     std::env::temp_dir().join(filename)
 }
 
-fn map_hwp_error(error: HwpError) -> ToolError {
+fn map_hwp_error(error: HwpError) -> AppError {
     match error {
         HwpError::UnsupportedVersion(message) => {
             if message.contains("Password-encrypted") {
-                ToolError {
-                    kind: errors::ENCRYPTED,
-                    message,
-                }
+                AppError::encrypted(message)
             } else {
-                ToolError {
-                    kind: errors::PARSE_FAILED,
-                    message,
-                }
+                AppError::parse_failed(message)
             }
         }
-        HwpError::InvalidInput(message) => ToolError {
-            kind: errors::INVALID_INPUT,
-            message,
-        },
-        HwpError::Io(err) => ToolError {
-            kind: errors::INVALID_INPUT,
-            message: err.to_string(),
-        },
+        HwpError::InvalidInput(message) => AppError::invalid_input(message),
+        HwpError::Io(err) => AppError::invalid_input(err.to_string()),
         HwpError::InvalidFormat(message)
         | HwpError::Cfb(message)
         | HwpError::CompressionError(message)
         | HwpError::ParseError(message)
         | HwpError::EncodingError(message)
-        | HwpError::NotFound(message) => ToolError {
-            kind: errors::PARSE_FAILED,
-            message,
-        },
+        | HwpError::NotFound(message) => AppError::parse_failed(message),
     }
 }
 
-fn map_hwp_error_with_format(error: HwpError, format: &str) -> ToolError {
+fn map_hwp_error_with_format(error: HwpError, format: &str) -> AppError {
     let mut mapped = map_hwp_error(error);
     mapped.message = format!("{format} parse failed: {}", mapped.message);
     mapped
