@@ -754,11 +754,9 @@ fn build_hwp(document: &DocumentSpec, warnings: &mut Vec<String>) -> Result<Vec<
                                 row_span as u16,
                                 col_span as u16,
                             );
-                        } else if cell.row_span.is_some() {
-                            let row_span = cell.row_span.unwrap();
+                        } else if let Some(row_span) = cell.row_span {
                             builder = builder.merge_cells(r as u32, c as u32, row_span as u16, 1);
-                        } else if cell.col_span.is_some() {
-                            let col_span = cell.col_span.unwrap();
+                        } else if let Some(col_span) = cell.col_span {
                             builder = builder.merge_cells(r as u32, c as u32, 1, col_span as u16);
                         }
 

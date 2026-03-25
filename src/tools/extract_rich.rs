@@ -390,7 +390,7 @@ fn infer_table_dims(cell_count: usize) -> (usize, usize) {
 
     let mut r = 1usize;
     while r * r <= cell_count {
-        if cell_count % r == 0 {
+        if cell_count.is_multiple_of(r) {
             let c = cell_count / r;
             let (rows, cols) = if r <= c { (r, c) } else { (c, r) };
             let diff = cols.saturating_sub(rows);
